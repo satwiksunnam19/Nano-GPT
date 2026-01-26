@@ -61,7 +61,7 @@ bias=False  # we don't use bias inside LN and LL
 # adam optimizer 
 learning_rate=6e-4 
 max_iters= 6000000 #max_lr 
-weigh_decay= 1e-1 
+weight_decay= 1e-1 
 beta1= 0.9 
 beta2= 0.95 
 grad_clip = 1.0  #clip gradients at this value, or disable if==0.0 
@@ -81,7 +81,7 @@ dtype='bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
 compile= True 
 
 # ------------------------------- 
-config_keys=[k for k,v in globals.items() if not k.startswith('_') and isinstance(v,(int,float,bool,str))]
+config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or conifg line  
 config={k:globals()[k] for k in config_keys} # will be used for logging 
 
@@ -117,12 +117,12 @@ if master_process :
 torch.manual_seed(1337+ seed_offset)
 torch.backends.cuda.matmul.allow_tf32= True # allow tf32 
 torch.backends.cudnn.allow_tf32= True # allow tf32 on cudnn 
-device_type='cuda' if 'cuda' in device else "cpu"
+device_type='cuda' if 'cuda' in device else ('mps' if 'mps' in device else 'cpu')
 ptdtype={'float32':torch.float32, 'bfloat16':torch.bfloat16, 'float16':torch.float16}[dtype]
 ctx= nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type=device_type,dtype=ptdtype)
 
 # poor man's data loader 
-data_dir= os.path('data',dataset)
+data_dir= os.path.join('data',dataset)
 def get_batch(split): 
     # we recreate np.memmap every batch to avoid memory leak, as per 
     if split == "train": 
@@ -207,11 +207,12 @@ if block_size< model.config.block_size:
 
 model.to(device)
 
-# initalize a GradScaler. if enabled=False scaler is no-op 
-scaler= torch.cuda.amp.GradScaler(enabled=(dtype=='float16'))
+# initalize a GradScaler. if enabled=False scaler is no-op
+# Note: GradScaler only works with CUDA, not MPS
+scaler= torch.amp.GradScaler(device_type, enabled=(dtype=='float16' and device_type=='cuda'))
 
 # optimizer 
-optimizer= model.configure_optimizers(weigh_decay,learning_rate, (beta1,beta2), device_type)
+optimizer= model.configure_optimizers(weight_decay,learning_rate, (beta1,beta2), device_type)
 if init_from  == 'resume': 
     optimizer.laod_state_dict(checkpoint['optimizer'])
 checkpoint=None # free up memory 
@@ -320,10 +321,10 @@ while True:
         # backward pass, with gradient scaling if training in fp16 
         scaler.scale(loss).backward()
 
-    # clip the gradient 
-    if grad_clip!= 0.0 : 
+    # clip the gradient
+    if grad_clip!= 0.0:
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm(model.parameters(),grad_clip)
+        torch.nn.utils.clip_grad_norm_(model.parameters(),grad_clip)
     
     # step the optimizer and scaler if training in fp16 
     scaler.step(optimizer)
@@ -352,4 +353,3 @@ while True:
 
 if ddp: 
     destroy_process_group() 
-    

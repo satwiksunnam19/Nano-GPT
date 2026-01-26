@@ -437,6 +437,7 @@ with torch.no_grad():
 
         # calculate entropy for each query position 
         # each row is a prob distribution over keys 
+        
         layer_entropies=[]
         for query_pos in range(avg_att.shape[0]):
             probs= avg_att[query_pos] 
