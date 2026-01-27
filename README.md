@@ -5,8 +5,6 @@ A hands-on exploration and educational extension of [Andrej Karpathy's nanoGPT](
 > **🚀 Apple Silicon Optimized!** This fork includes full MPS support for M1/M2/M3/M4 MacBooks with optimized training scripts. Train a 30M parameter GPT model in just 30-40 minutes on M4!
 
 ## Key Features
-
-- ✅ **Multiple Critical Bug Fixes** - Fixed indentation errors, path handling, GradScaler compatibility
 - ✅ **Apple Silicon (MPS) Support** - Full Metal Performance Shaders support for M1/M2/M3/M4
 - ✅ **Optimized Training Scripts** - `train_mac.sh` and `train_m4.sh` for quick training
 - ✅ **Comprehensive Testing** - Component-level tests for every module
@@ -92,7 +90,7 @@ Default configuration: 12 layers, 12 heads, 768 embedding dimensions (~124M para
 
 ```bash
 # Clone the repository
-git clone <your-repo-url>
+git clone <https://github.com/satwiksunnam19/Nano-GPT.git>
 cd Nano_GPT_
 
 # Install dependencies
@@ -366,100 +364,6 @@ python train.py \
 - **Floats**: `0.1`, `1e-3`, `5e-4` (scientific notation supported)
 - **Strings**: `"mps"`, `"shakesphere"`, `"cuda"`
 
-## Bug Fixes Applied
-
-This repository includes fixes for several critical bugs found in the original implementation:
-
-### 1. **Method Indentation Errors** (model.py)
-- Fixed `configure_optimizers` - was at module level instead of class method
-- Fixed `estimate_mfu` - was at module level instead of class method
-- Fixed `generate` - was incorrectly indented (typo: `genrate` → `generate`)
-
-### 2. **Path Handling** (train.py:125)
-```python
-# Before: data_dir= os.path('data',dataset)  # TypeError!
-# After:  data_dir= os.path.join('data',dataset)
-```
-
-### 3. **Typo in Variable Name** (train.py:64, 214)
-```python
-# Before: weigh_decay= 1e-1
-# After:  weight_decay= 1e-1
-```
-
-### 4. **GradScaler MPS Compatibility** (train.py:211-213)
-```python
-# Before: scaler= torch.cuda.amp.GradScaler(...)  # Only works on CUDA
-# After:  scaler= torch.amp.GradScaler(device_type, enabled=(dtype=='float16' and device_type=='cuda'))
-```
-
-### 5. **Device Type Detection** (train.py:120)
-```python
-# Before: device_type='cuda' if 'cuda' in device else 'cpu'  # Didn't handle MPS
-# After:  device_type='cuda' if 'cuda' in device else ('mps' if 'mps' in device else 'cpu')
-```
-
-### 6. **Deprecated Gradient Clipping** (train.py:327)
-```python
-# Before: torch.nn.utils.clip_grad_norm(...)  # Deprecated
-# After:  torch.nn.utils.clip_grad_norm_(...)  # Correct API
-```
-
-### 7. **Scientific Notation Parsing** (configurator.py)
-- Added proper parsing for scientific notation like `1e-3`, `5e-4`
-- Handles integers, floats, booleans, and strings
-
-## Common Issues & Solutions
-
-### 1. LayerNorm Mean/Std Confusion
-**Issue**: Computing global stats instead of per-position
-```python
-# Wrong: Global statistics
-out.mean()  # Returns single value
-
-# Correct: Per-position statistics
-out.mean(dim=-1)  # Returns (B, T) tensor
-```
-
-### 2. Attention Visualization
-**Issue**: Flash attention doesn't return weights
-```python
-# Force manual attention
-attn.flash = False
-output, att_weights = attn(x, return_attention=True)
-```
-
-### 3. Block Size Mismatch
-**Issue**: `RuntimeError: size of tensor a (4) must match size b (16)`
-```python
-# Ensure sequence length <= block_size
-config = Config(block_size=16)  # Must be >= sequence length
-idx = torch.randint(0, vocab_size, (batch, 16))
-```
-
-### 4. MPS Out of Memory (Apple Silicon)
-**Issue**: `RuntimeError: MPS backend out of memory`
-```bash
-# Solution 1: Reduce batch size
-python train.py --batch_size=2  # or even 1
-
-# Solution 2: Reduce model size
-python train.py --n_layer=4 --n_embd=256
-
-# Solution 3: Reduce sequence length
-python train.py --block_size=256
-```
-
-### 5. Training Very Slow on Mac
-**Issue**: Not using MPS acceleration
-```bash
-# Check if MPS is available
-python -c "import torch; print(f'MPS: {torch.backends.mps.is_available()}')"
-
-# Should print: MPS: True
-# If False, reinstall PyTorch with MPS support
-conda install pytorch torchvision torchaudio -c pytorch
-```
 
 ## Training Guides
 
