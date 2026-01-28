@@ -1,7 +1,7 @@
 #!/bin/bash
-# Full push script: commits changes, removes >100 MB files from history,
+# Full push script: commits changes, removes >100 MB files from history (excluding .claude/ and git_push.sh),
 # keeps backup branch, re-adds remote, force pushes clean repo.
-# Usage: ./git_push_clean.sh /path/to/project "Commit message" <remote_url>
+# Usage: ./git_push_clean.sh /path/to/project "Commit message" <remote_url> [branch]
 
 PROJECT_PATH="$1"
 COMMIT_MESSAGE="$2"
@@ -51,21 +51,30 @@ git rev-list --objects --all | \
   git cat-file --batch-check='%(objecttype) %(objectname) %(objectsize) %(rest)' | \
   awk '$3 > 100000000 {print $4}' > /tmp/large_files.txt
 
+# --- Remove large files except exclusions ---
 if [ -s /tmp/large_files.txt ]; then
-  echo "⚠️  Large files found and will be removed from all commits:"
-  cat /tmp/large_files.txt
 
   # Create backup branch before rewriting
   BACKUP_BRANCH="backup-before-cleanup-$(date +%Y%m%d%H%M%S)"
-  echo "🔒 Creating backup branch $BACKUP_BRANCH"
+  echo "🔒 Creating backup branch $BACKUP_BRANCH..."
   git branch "$BACKUP_BRANCH"
 
-  while read -r filepath; do
-    echo "🗑️  Removing $filepath from all commits…"
-    git filter-repo --path "$filepath" --invert-paths --force
-  done < /tmp/large_files.txt
+  # Filter out exclusions (.claude/ and git_push.sh)
+  grep -vE '^\.claude/|git_push\.sh$' /tmp/large_files.txt > /tmp/filtered_large_files.txt
 
-  # Re-add origin automatically after filter-repo
+  if [ ! -s /tmp/filtered_large_files.txt ]; then
+    echo "ℹ️ No large files to remove after exclusions."
+  else
+    echo "⚠️ Large files to be removed from history (excluding .claude/ and git_push.sh):"
+    cat /tmp/filtered_large_files.txt
+
+    while read -r filepath; do
+      echo "🗑️  Removing $filepath from all commits…"
+      git filter-repo --path "$filepath" --invert-paths --force
+    done < /tmp/filtered_large_files.txt
+  fi
+
+  # Ensure origin exists after filter-repo
   if ! git remote | grep origin >/dev/null; then
     echo "🔗 Re-adding origin remote…"
     git remote add origin "$REMOTE_URL"
@@ -78,5 +87,5 @@ fi
 echo "📤 Force pushing cleaned $BRANCH_NAME to remote…"
 git push origin "$BRANCH_NAME" --force
 
-echo "✅ Push complete. Clean history on GitHub."
-echo "ℹ️  Original history preserved locally in branch: $BACKUP_BRANCH (if created)."
+echo "✅ Push complete. Clean history on remote."
+echo "ℹ️ Original history is preserved locally in branch: $BACKUP_BRANCH (if created)."

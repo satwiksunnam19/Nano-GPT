@@ -32,7 +32,9 @@ python train.py \
     --gradient_acculation_steps=1 \
     --warmup_iters=200 \
     --lr_decay_iters=8000 \
-    --out_dir=out-shakespeare-m4
+    --out_dir=out-shakespeare-m4\
+    --attention_type=gqa\ 
+    --n_kv_heads=4\
 
 echo ""
 echo "✅ Training complete! Model saved in: out-shakespeare-m4/"

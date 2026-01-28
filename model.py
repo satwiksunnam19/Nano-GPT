@@ -107,22 +107,33 @@ class MLP(nn.Module):
         return x 
 
 class Block(nn.Module):
-    """ 
-    key-concepts: 
-    a) pre-norm architecture : 
+    """
+    key-concepts:
+    a) pre-norm architecture:
     LN -> Attn -> Add(residual)
-    LN -> MLP-> Add(residual) 
-    b) residual connections 
-    helps grad flow 
+    LN -> MLP-> Add(residual)
+    b) residual connections
+    helps grad flow
     allow deep networks (12+ layers)
     """
 
-    def __init__(self,config): 
+    def __init__(self, config):
         super().__init__()
-        self.ln_1= LayerNorm(config.n_embd, bias=config.bias)
-        self.attn= CausalSelfAttention(config)
-        self.ln_2= LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp= MLP(config)
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+
+        # Select attention mechanism based on config
+        if config.attention_type == "gqa":
+            from attention_ablation import GQA
+            self.attn = GQA(config)
+        elif config.attention_type == "mla":
+            from attention_ablation import MLA
+            self.attn = MLA(config)
+        else:  # "standard"
+            self.attn = CausalSelfAttention(config)
+
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.mlp = MLP(config)
+        
 
     def forward(self,x,return_attention=False):
         if return_attention: 
@@ -139,15 +150,19 @@ class Block(nn.Module):
         return x 
 
 
-@dataclass 
-class GPTConfig: 
-    block_size: int= 1024 
-    vocab_size : int = 50304 
-    n_layer : int = 12 
-    n_head: int = 12 
-    n_embd:int= 768 
-    dropout : int = 0.0 
-    bias : bool = True # True : bias in Linears and LN, in GPT-2 False: a bit faster and better
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True  # True: bias in Linears and LN, in GPT-2 False: a bit faster and better
+    # Attention mechanism: "standard", "gqa", "mla"
+    attention_type: str = "standard"
+    n_kv_heads: int = 4  # for GQA: number of key-value heads (must divide n_head)
+    latent_dim: int = 128  # for MLA: latent dimension for KV compression
 
 class GPT(nn.Module):
 
