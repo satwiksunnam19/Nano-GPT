@@ -6,9 +6,11 @@ import math
 import inspect # useful for the getting info from the oython objs 
 from dataclasses import dataclass 
 
-import torch 
-import torch.nn as nn 
-from torch.nn import functional as F 
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+
+from masking import Causal_Masking, Intra_Document_Masking 
 
 class LayerNorm(nn.Module):
     """ 
@@ -54,40 +56,47 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias",torch.tril(torch.ones(config.block_size,config.block_size)).view(1,1,config.block_size, config.block_size))
 
     
-    def forward(self,x,return_attention=False):
-        B,T,C= x.size() # batch size, seq length, embedding dimentionality (n_embd)
+    def forward(self, x, mask=None, return_attention=False):
+        B, T, C = x.size()  # batch size, seq length, embedding dimensionality (n_embd)
 
-        # caluclating query, key, values fr all heads in batch and move head forward to be the batch dim 
+        # calculating query, key, values for all heads in batch and move head forward to be the batch dim
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
-        q,k,v=self.c_attn(x).split(self.n_embd,dim=2)
-        k=k.view(B,T,self.n_head,C//self.n_head).transpose(1,2) #(B,nh,T,hs)
-        q=q.view(B,T,self.n_head,C//self.n_head).transpose(1,2) #(B,nh,T,hs)
-        v=v.view(B,T,self.n_head,C//self.n_head).transpose(1,2) #(B,nh,T,hs) 
+        # causal self attention; Self-attend (B, nh, T, S) x (B, nh, T, T)
+        if self.flash and mask is None:
+            # efficient attention using Flash Attention CUDA Kernels (only for standard causal)
+            y = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=None,
+                dropout_p=self.dropout if self.training else 0,
+                is_causal=True
+            )
+            att = None
+        else:
+            # manual implementation of self attention
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
 
-        # causal self attention; Self-attend (B,nh,T,S)x(B,nh,T,T)
+            if mask is not None:
+                # use provided mask (e.g., intra-document mask)
+                att = att.masked_fill(mask == 0, float('-inf'))
+            else:
+                # fallback to standard causal mask
+                att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
 
-        if self.flash: 
-            # efficient attention using Flash Attention CUDA Kernels 
-            y=torch.nn.functional.scaled_dot_product_attention(q,k,v,attn_mask=None,dropout_p=self.dropout if self.training else 0, is_causal=True)
-            att=None
-        else: 
-            # manual implementation of self attention 
-            att=(q@k.transpose(-2,-1))*(1.0/math.sqrt(k.size(-1)))
-            # try masking and un-masking to learn the attending past and future 
-            att=att.masked_fill(self.bias[:,:,:T,:T]==0,float('-inf'))
-            att=F.softmax(att,dim=-1)
-            att=self.attn_dropout(att)
-            y=att@v #(B,nh,T,T)x(B,nh,T,hs) -> (B,nh,T,hs)
+            att = F.softmax(att, dim=-1)
+            att = self.attn_dropout(att)
+            y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
 
-        y=y.transpose(1,2).contiguous().view(B,T,C) #re-assemble all heads outputs side by side 
+        y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all heads outputs side by side
 
-        # output projectios 
-        y=self.resid_dropout(self.c_proj(y))  
+        # output projection
+        y = self.resid_dropout(self.c_proj(y))
 
-        if return_attention: 
-            return y, att 
-        else: 
-            return y 
+        if return_attention:
+            return y, att
+        return y 
     
 class MLP(nn.Module):
 
@@ -135,18 +144,18 @@ class Block(nn.Module):
         self.mlp = MLP(config)
         
 
-    def forward(self,x,return_attention=False):
-        if return_attention: 
-            attn_out,att_weights=self.attn(self.ln_1(x),return_attention=True)
-            x=x+attn_out
-        else: 
-            x=x+ self.attn(self.ln_1(x))
-        
-        x=x+ self.mlp(self.ln_2(x))
+    def forward(self, x, mask=None, return_attention=False):
+        if return_attention:
+            attn_out, att_weights = self.attn(self.ln_1(x), mask=mask, return_attention=True)
+            x = x + attn_out
+        else:
+            x = x + self.attn(self.ln_1(x), mask=mask)
 
-        if return_attention: 
-            return x, att_weights 
-        
+        x = x + self.mlp(self.ln_2(x))
+
+        if return_attention:
+            return x, att_weights
+
         return x 
 
 
@@ -163,6 +172,9 @@ class GPTConfig:
     attention_type: str = "standard"
     n_kv_heads: int = 4  # for GQA: number of key-value heads (must divide n_head)
     latent_dim: int = 128  # for MLA: latent dimension for KV compression
+    # Masking: "causal" or "intra_document"
+    masking_type: str = "causal"
+    eos_token_id: int = 50256  # for intra-document masking
 
 class GPT(nn.Module):
 
@@ -181,13 +193,19 @@ class GPT(nn.Module):
         ))
 
 
-        self.lm_head= nn.Linear(config.n_embd, config.vocab_size, bias=False) # embeedings to vocab probs 
-        """ 
-        weight tying: input embedding and output projection share weights 
-        reduces params, better performance empirically,  
-        makes sense: similar tokens should have similar embeddings and predictions 
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)  # embeddings to vocab probs
         """
-        self.transformer.wte.weight= self.lm_head.weight  
+        weight tying: input embedding and output projection share weights
+        reduces params, better performance empirically,
+        makes sense: similar tokens should have similar embeddings and predictions
+        """
+        self.transformer.wte.weight = self.lm_head.weight
+
+        # masking module
+        if config.masking_type == "intra_document":
+            self.masking = Intra_Document_Masking(config)
+        else:
+            self.masking = None  # use default causal in attention  
 
         # init all weights 
         self.apply(self._init_weights)
@@ -219,19 +237,27 @@ class GPT(nn.Module):
         elif isinstance(module,nn.Embedding): 
             torch.nn.init.normal_(module.weight,mean=0.0, std=0.02)
 
-    def forward(self,idx, targets=None):
-        device=idx.device 
-        b,t= idx.size()
-        assert t <= self.config.block_size,  f"Cannot forward seq of length {t}, block size is only {self.config.block_size}"
-        pos=torch.arange(0,t,dtype=torch.long, device=device)
+    def forward(self, idx, targets=None, document_ids=None):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward seq of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device)
 
-        # frwd the gpt model itself 
-        tok_emb= self.transformer.wte(idx) #(b,t,n_embd)
-        pos_emb=self.transformer.wpe(pos)  # (t,n_embd)
-        x=self.transformer.drop(tok_emb+pos_emb)
-        for block in self.transformer.h: 
-            x=block(x)
-        x=self.transformer.ln_f(x)
+        # create mask if using intra-document masking
+        mask = None
+        if self.masking is not None:
+            if document_ids is None:
+                # auto-detect document boundaries from eos tokens
+                document_ids = Intra_Document_Masking.get_document_ids(idx, self.config.eos_token_id)
+            mask = self.masking(document_ids)
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
+        x = self.transformer.drop(tok_emb + pos_emb)
+        for block in self.transformer.h:
+            x = block(x, mask=mask)
+        x = self.transformer.ln_f(x)
 
         if targets is not None: 
             # if we are given some desired targets also calculate the loss 
