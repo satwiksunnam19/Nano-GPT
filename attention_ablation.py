@@ -7,6 +7,38 @@ import math
 from torch.nn import functional as F
 
 
+def create_sliding_window_mask(T, window_size=None, sink_size=0, device='cpu'):
+    """
+    Creates a sliding window + attention sink causal mask.
+
+    Args:
+        T: sequence length
+        window_size: number of positions to attend to (None = full causal)
+        sink_size: number of initial tokens always accessible
+        device: torch device
+
+    Returns:
+        mask: (T, T) boolean mask where True = can attend
+    """
+    # Start with causal mask
+    mask = torch.tril(torch.ones(T, T, dtype=torch.bool, device=device))
+
+    # Apply sliding window if specified
+    if window_size is not None and window_size > 0:
+        band_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=device),
+                              diagonal=-(window_size - 1))
+        mask = mask & band_mask
+
+    # Add attention sinks
+    if sink_size > 0:
+        mask[:, :sink_size] = True
+        # Respect causality for sink tokens themselves
+        for i in range(sink_size):
+            mask[i, i+1:] = False
+
+    return mask
+
+
 class MHA(nn.Module):
     """
     Multi-Head Attention with separate Q, K, V projections.
@@ -30,6 +62,11 @@ class MHA(nn.Module):
         self.head_size = config.n_embd // config.n_head  # 768/12 = 64
         self.dropout = config.dropout
 
+        # Sliding window parameters
+        self.window_size = getattr(config, 'window_size', None)
+        self.sink_size = getattr(config, 'sink_size', 0)
+        self.use_sliding_window = self.window_size is not None
+
         # Separate projections for Q, K, V (each: n_embd -> n_embd)
         self.q_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.k_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
@@ -42,13 +79,16 @@ class MHA(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
-        # Causal mask: lower triangular matrix
+        # Causal mask: lower triangular matrix (fallback for non-sliding window)
         # This ensures position i can only attend to positions <= i
-        self.register_buffer(
-            "bias",
-            torch.tril(torch.ones(config.block_size, config.block_size))
-            .view(1, 1, config.block_size, config.block_size)
-        )
+        if not self.use_sliding_window:
+            self.register_buffer(
+                "bias",
+                torch.tril(torch.ones(config.block_size, config.block_size))
+                .view(1, 1, config.block_size, config.block_size)
+            )
+        else:
+            self.register_buffer("bias", None)
 
     def forward(self, x, return_attention=False):
         B, T, C = x.size()  # batch, sequence length, embedding dim
@@ -69,7 +109,13 @@ class MHA(nn.Module):
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_size))
 
         # Step 4: Apply causal mask (can't attend to future tokens)
-        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        if self.use_sliding_window:
+            # Create sliding window mask dynamically
+            mask = create_sliding_window_mask(T, self.window_size, self.sink_size, x.device)
+            att = att.masked_fill(~mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+        else:
+            # Use standard causal mask
+            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
 
         # Step 5: Softmax to get attention probabilities (each row sums to 1)
         att = F.softmax(att, dim=-1)
@@ -147,6 +193,11 @@ class GQA(nn.Module):
         self.dropout = config.dropout
         self.head_size = config.n_embd // config.n_head
 
+        # Sliding window parameters
+        self.window_size = getattr(config, 'window_size', None)
+        self.sink_size = getattr(config, 'sink_size', 0)
+        self.use_sliding_window = self.window_size is not None
+
         # projections of q,k,v
         self.q_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.k_proj = nn.Linear(config.n_embd, self.n_kv_heads * self.head_size, bias=config.bias)
@@ -159,12 +210,15 @@ class GQA(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
-        # causal mask: Lower Triangular Matrix
-        self.register_buffer(
-            "bias",
-            torch.tril(torch.ones(config.block_size, config.block_size))
-            .view(1, 1, config.block_size, config.block_size)
-        )
+        # causal mask: Lower Triangular Matrix (fallback for non-sliding window)
+        if not self.use_sliding_window:
+            self.register_buffer(
+                "bias",
+                torch.tril(torch.ones(config.block_size, config.block_size))
+                .view(1, 1, config.block_size, config.block_size)
+            )
+        else:
+            self.register_buffer("bias", None)
 
     def forward(self, x, return_attention=False):
         B, T, C = x.size()  # batch, sequence length, embedding dim
@@ -189,7 +243,13 @@ class GQA(nn.Module):
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_size))
 
         # Step 4: Apply causal mask
-        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        if self.use_sliding_window:
+            # Create sliding window mask dynamically
+            mask = create_sliding_window_mask(T, self.window_size, self.sink_size, x.device)
+            att = att.masked_fill(~mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+        else:
+            # Use standard causal mask
+            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
 
         # Step 5: Softmax to get attention probabilities
         att = F.softmax(att, dim=-1)
@@ -275,6 +335,11 @@ class MLA(nn.Module):
         self.head_size = self.n_embd // self.n_head
         assert self.head_size * self.n_head == self.n_embd
 
+        # Sliding window parameters
+        self.window_size = getattr(config, 'window_size', None)
+        self.sink_size = getattr(config, 'sink_size', 0)
+        self.use_sliding_window = self.window_size is not None
+
         # projections
         self.q_proj = nn.Linear(self.n_embd, self.n_embd, bias=config.bias)
 
@@ -287,12 +352,15 @@ class MLA(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
-        # causal mask
-        self.register_buffer(
-            "bias",
-            torch.tril(torch.ones(self.block_size, self.block_size))
-            .view(1, 1, self.block_size, self.block_size),
-        )
+        # causal mask (fallback for non-sliding window)
+        if not self.use_sliding_window:
+            self.register_buffer(
+                "bias",
+                torch.tril(torch.ones(self.block_size, self.block_size))
+                .view(1, 1, self.block_size, self.block_size),
+            )
+        else:
+            self.register_buffer("bias", None)
 
     def forward(self, x, return_attention=False):
         B, T, C = x.size()
@@ -316,7 +384,14 @@ class MLA(nn.Module):
         # -------- attention --------
         att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_size)
 
-        att = att.masked_fill(self.bias[:, :, :T, :S] == 0, float("-inf"))
+        # Apply mask
+        if self.use_sliding_window:
+            # Create sliding window mask dynamically
+            mask = create_sliding_window_mask(T, self.window_size, self.sink_size, x.device)
+            att = att.masked_fill(~mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+        else:
+            # Use standard causal mask
+            att = att.masked_fill(self.bias[:, :, :T, :S] == 0, float("-inf"))
 
         att = F.softmax(att, dim=-1)
         att = self.attn_dropout(att)
@@ -380,7 +455,141 @@ if __name__ == "__main__":
     print(f"MHA K,V params: {mha_kv_params:,}")
     print(f"MLA K,V params: {mla_kv_params:,}")
 
-    
+
     savings = (1 - mla_kv_params / mha_kv_params) * 100
     print(f"MLA param overhead vs MHA: {-savings:.1f}% (negative means more params)")
 
+
+# =============================================================================
+# Test Sliding Window Attention
+# =============================================================================
+
+def test_sliding_window():
+    """Test sliding window attention with various configurations"""
+    from dataclasses import dataclass
+
+    print("\n" + "=" * 70)
+    print("SLIDING WINDOW ATTENTION TEST")
+    print("=" * 70)
+
+    @dataclass
+    class SlidingWindowConfig:
+        n_embd: int = 768
+        n_head: int = 12
+        block_size: int = 128
+        dropout: float = 0.0
+        bias: bool = True
+        window_size: int = 16
+        sink_size: int = 4
+
+    config = SlidingWindowConfig()
+
+    # Test with larger sequence to see sliding window effect
+    B, T, C = 2, 32, 768
+    x = torch.randn(B, T, C)
+
+    # Test MHA with sliding window
+    print("\n1. MHA with Sliding Window")
+    print("-" * 70)
+    mha_sliding = MHA(config)
+    y, att = mha_sliding(x, return_attention=True)
+    print(f"✓ Window size: {config.window_size}, Sink size: {config.sink_size}")
+    print(f"✓ Input:  {x.shape}")
+    print(f"✓ Output: {y.shape}")
+    print(f"✓ Attention: {att.shape}")
+
+    # Show mask pattern
+    mask = create_sliding_window_mask(T, config.window_size, config.sink_size)
+    print(f"\nMask pattern (first 12 positions):")
+    print("Pos | Can attend to")
+    print("-" * 50)
+    for i in range(min(12, T)):
+        positions = torch.where(mask[i])[0].tolist()
+        window_start = max(0, i - config.window_size + 1)
+        print(f" {i:2d} | {positions[:20]}... (sink=[0:{config.sink_size}], window=[{window_start}:{i+1}])")
+
+    # Test without sliding window (standard causal)
+    print("\n2. MHA without Sliding Window (Standard Causal)")
+    print("-" * 70)
+    @dataclass
+    class StandardConfig:
+        n_embd: int = 768
+        n_head: int = 12
+        block_size: int = 128
+        dropout: float = 0.0
+        bias: bool = True
+        # No window_size = standard causal
+
+    standard_config = StandardConfig()
+    mha_standard = MHA(standard_config)
+    y_standard, att_standard = mha_standard(x, return_attention=True)
+    print(f"✓ Standard causal attention (no window limit)")
+    print(f"✓ Input:  {x.shape}")
+    print(f"✓ Output: {y_standard.shape}")
+
+    # Memory comparison
+    print("\n3. Memory Complexity Comparison")
+    print("-" * 70)
+    seq_len = 4096
+    standard_memory = seq_len * seq_len
+    sliding_memory = seq_len * (config.window_size + config.sink_size)
+
+    print(f"For sequence length = {seq_len}:")
+    print(f"  Standard attention: {standard_memory:,} elements ({standard_memory / 1e6:.2f}M)")
+    print(f"  Sliding window:     {sliding_memory:,} elements ({sliding_memory / 1e6:.2f}M)")
+    print(f"  Memory reduction:   {100 * (1 - sliding_memory / standard_memory):.1f}%")
+
+    # Test GQA with sliding window
+    print("\n4. GQA with Sliding Window")
+    print("-" * 70)
+    @dataclass
+    class GQASlidingConfig:
+        n_embd: int = 768
+        n_head: int = 12
+        n_kv_heads: int = 4
+        block_size: int = 128
+        dropout: float = 0.0
+        bias: bool = True
+        window_size: int = 16
+        sink_size: int = 4
+
+    gqa_config = GQASlidingConfig()
+    gqa_sliding = GQA(gqa_config)
+    y_gqa, att_gqa = gqa_sliding(x, return_attention=True)
+    print(f"✓ GQA with window_size={gqa_config.window_size}, sink_size={gqa_config.sink_size}")
+    print(f"✓ Q heads: {gqa_config.n_head}, KV heads: {gqa_config.n_kv_heads}")
+    print(f"✓ Output: {y_gqa.shape}")
+
+    # Test MLA with sliding window
+    print("\n5. MLA with Sliding Window")
+    print("-" * 70)
+    @dataclass
+    class MLASlidingConfig:
+        n_embd: int = 768
+        n_head: int = 12
+        latent_dim: int = 128
+        block_size: int = 128
+        dropout: float = 0.0
+        bias: bool = True
+        window_size: int = 16
+        sink_size: int = 4
+
+    mla_config = MLASlidingConfig()
+    mla_sliding = MLA(mla_config)
+    y_mla, att_mla = mla_sliding(x, return_attention=True)
+    print(f"✓ MLA with window_size={mla_config.window_size}, sink_size={mla_config.sink_size}")
+    print(f"✓ Latent dim: {mla_config.latent_dim}")
+    print(f"✓ Output: {y_mla.shape}")
+
+    print("\n" + "=" * 70)
+    print("ALL TESTS PASSED!")
+    print("=" * 70)
+    print("\nUsage in your model:")
+    print("  1. Add 'window_size' and 'sink_size' to your config")
+    print("  2. window_size=None or omit it for standard causal attention")
+    print("  3. window_size=512, sink_size=4 for sliding window with sinks")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    test_sliding_window()

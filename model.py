@@ -11,7 +11,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 from masking import Causal_Masking, Intra_Document_Masking
-from positional_encoding import RoPE 
+from positional_encoding import RoPE
+from attention_ablation import create_sliding_window_mask
 
 class LayerNorm(nn.Module):
     """ 
@@ -28,28 +29,36 @@ class LayerNorm(nn.Module):
 class CausalSelfAttention(nn.Module):
 
     def __init__(self,config):
-        super().__init__() 
+        super().__init__()
 
-        # because each head needs equal dimension. if n_embd=768 and n_head=12, each head gets 64 dims. 
+        # because each head needs equal dimension. if n_embd=768 and n_head=12, each head gets 64 dims.
         # why head needs equal dimension ?  becasue in MHA preocesses all heads in parallel using batch operation
-        assert config.n_embd % config.n_head==0 
+        assert config.n_embd % config.n_head==0
 
-        # key, query, value projections of all heads, but in a batch  
+        # key, query, value projections of all heads, but in a batch
 
         self.c_attn=nn.Linear(config.n_embd,3*config.n_embd,bias=config.bias)
 
-        # output projection 
+        # output projection
         self.c_proj= nn.Linear(config.n_embd,config.n_embd,bias=config.bias)
 
-        # regularization 
+        # regularization
         self.attn_dropout=nn.Dropout(config.dropout)
         self.resid_dropout=nn.Dropout(config.dropout)
-        self.n_head=config.n_head 
-        self.n_embd=config.n_embd 
-        self.dropout=config.dropout 
-        
+        self.n_head=config.n_head
+        self.n_embd=config.n_embd
+        self.dropout=config.dropout
+
+        # Sliding window parameters
+        self.window_size = getattr(config, 'window_size', None)
+        self.sink_size = getattr(config, 'sink_size', 0)
+        self.use_sliding_window = self.window_size is not None
+
         # flash attention make GPU got burrrrr
         self.flash = hasattr(torch.functional,'scaled_dot_product_attention')
+        # Disable flash attention if using custom masking
+        if self.use_sliding_window:
+            self.flash = False  # sliding window needs custom masking
 
         # RoPE for rotary position embedding
         self.use_rope = config.position_encoding == "rope"
@@ -57,10 +66,14 @@ class CausalSelfAttention(nn.Module):
             head_dim = config.n_embd // config.n_head
             self.rope = RoPE(head_dim, max_seq_len=config.block_size)
 
-        if not self.flash:
-            print("Warning:using slow attention, flash attention requires pytorch >=2.0 and compitable NV GPU")
-            # casual mask to ensure that attention is only applied to the left in the seq
-            self.register_buffer("bias",torch.tril(torch.ones(config.block_size,config.block_size)).view(1,1,config.block_size, config.block_size))
+        if not self.flash or self.use_sliding_window:
+            if not self.use_sliding_window:
+                print("Warning:using slow attention, flash attention requires pytorch >=2.0 and compitable NV GPU")
+                # casual mask to ensure that attention is only applied to the left in the seq
+                self.register_buffer("bias",torch.tril(torch.ones(config.block_size,config.block_size)).view(1,1,config.block_size, config.block_size))
+            else:
+                # sliding window will create mask dynamically
+                self.register_buffer("bias", None)
 
     
     def forward(self, x, mask=None, return_attention=False):
@@ -77,7 +90,7 @@ class CausalSelfAttention(nn.Module):
             q, k = self.rope(q, k, T)
 
         # causal self attention; Self-attend (B, nh, T, S) x (B, nh, T, T)
-        if self.flash and mask is None:
+        if self.flash and mask is None and not self.use_sliding_window:
             # efficient attention using Flash Attention CUDA Kernels (only for standard causal)
             y = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, attn_mask=None,
@@ -92,6 +105,10 @@ class CausalSelfAttention(nn.Module):
             if mask is not None:
                 # use provided mask (e.g., intra-document mask)
                 att = att.masked_fill(mask == 0, float('-inf'))
+            elif self.use_sliding_window:
+                # use sliding window mask
+                sliding_mask = create_sliding_window_mask(T, self.window_size, self.sink_size, x.device)
+                att = att.masked_fill(~sliding_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
             else:
                 # fallback to standard causal mask
                 att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
@@ -188,6 +205,9 @@ class GPTConfig:
     eos_token_id: int = 50256  # for intra-document masking
     # Position encoding: "learned" or "rope"
     position_encoding: str = "learned"
+    # Sliding window attention: None = full causal, or specify window size
+    window_size: int = None  # number of recent tokens to attend to (e.g., 512)
+    sink_size: int = 0  # number of initial tokens always accessible (e.g., 4)
 
 class GPT(nn.Module):
 
