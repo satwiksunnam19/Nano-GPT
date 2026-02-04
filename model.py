@@ -10,7 +10,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from masking import Causal_Masking, Intra_Document_Masking 
+from masking import Causal_Masking, Intra_Document_Masking
+from positional_encoding import RoPE 
 
 class LayerNorm(nn.Module):
     """ 
@@ -47,12 +48,18 @@ class CausalSelfAttention(nn.Module):
         self.n_embd=config.n_embd 
         self.dropout=config.dropout 
         
-        # flash attention make GPU got burrrrr 
-        self.flash = hasattr(torch.functional,'scaled_dot_product_attention') 
+        # flash attention make GPU got burrrrr
+        self.flash = hasattr(torch.functional,'scaled_dot_product_attention')
 
-        if not self.flash: 
+        # RoPE for rotary position embedding
+        self.use_rope = config.position_encoding == "rope"
+        if self.use_rope:
+            head_dim = config.n_embd // config.n_head
+            self.rope = RoPE(head_dim, max_seq_len=config.block_size)
+
+        if not self.flash:
             print("Warning:using slow attention, flash attention requires pytorch >=2.0 and compitable NV GPU")
-            # casual mask to ensure that attention is only applied to the left in the seq 
+            # casual mask to ensure that attention is only applied to the left in the seq
             self.register_buffer("bias",torch.tril(torch.ones(config.block_size,config.block_size)).view(1,1,config.block_size, config.block_size))
 
     
@@ -64,6 +71,10 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+
+        # apply RoPE if enabled (rotates q and k based on position)
+        if self.use_rope:
+            q, k = self.rope(q, k, T)
 
         # causal self attention; Self-attend (B, nh, T, S) x (B, nh, T, T)
         if self.flash and mask is None:
@@ -175,6 +186,8 @@ class GPTConfig:
     # Masking: "causal" or "intra_document"
     masking_type: str = "causal"
     eos_token_id: int = 50256  # for intra-document masking
+    # Position encoding: "learned" or "rope"
+    position_encoding: str = "learned"
 
 class GPT(nn.Module):
 
@@ -216,16 +229,16 @@ class GPT(nn.Module):
         # report no of params  
         print("Number of parameters : %2fM" %(self.get_num_params()/1e6,))
 
-    def get_num_params(self,non_embedding=True): 
+    def get_num_params(self, non_embedding=True):
         """
-        Return the no.of params in the model 
-        For non-embedding count (default), the position embeddings get substracted. 
-        The token embeddings would too, exceot dude to the param sharing these params 
-        are actually used as weights in the final layer , so we include them. 
+        Return the no.of params in the model
+        For non-embedding count (default), the position embeddings get substracted.
+        The token embeddings would too, except due to the param sharing these params
+        are actually used as weights in the final layer, so we include them.
         """
-        n_params= sum(p.numel() for p in self.parameters())
-        if non_embedding: 
-            n_params-=self.transformer.wpe.weight.numel()
+        n_params = sum(p.numel() for p in self.parameters())
+        if non_embedding and self.config.position_encoding != "rope":
+            n_params -= self.transformer.wpe.weight.numel()
         return n_params
 
     def _init_weights(self,module): 
@@ -253,8 +266,13 @@ class GPT(nn.Module):
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+
+        # RoPE handles position in attention, so skip adding pos_emb
+        if self.config.position_encoding == "rope":
+            x = self.transformer.drop(tok_emb)
+        else:
+            pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
+            x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
             x = block(x, mask=mask)
         x = self.transformer.ln_f(x)
