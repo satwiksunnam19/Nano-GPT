@@ -19,7 +19,8 @@ def create_sliding_window_mask(T, window_size=None, sink_size=0, device='cpu'):
 
     Returns:
         mask: (T, T) boolean mask where True = can attend
-    """
+        
+    """ 
     # Start with causal mask
     mask = torch.tril(torch.ones(T, T, dtype=torch.bool, device=device))
 
@@ -90,7 +91,7 @@ class MHA(nn.Module):
         else:
             self.register_buffer("bias", None)
 
-    def forward(self, x, return_attention=False):
+    def forward(self, x, mask=None, return_attention=False):
         B, T, C = x.size()  # batch, sequence length, embedding dim
 
         # Step 1: Project to Q, K, V (each is B, T, C)
@@ -220,7 +221,7 @@ class GQA(nn.Module):
         else:
             self.register_buffer("bias", None)
 
-    def forward(self, x, return_attention=False):
+    def forward(self, x, mask=None, return_attention=False):
         B, T, C = x.size()  # batch, sequence length, embedding dim
 
         # Step 1: Project to Q, K, V
@@ -362,7 +363,7 @@ class MLA(nn.Module):
         else:
             self.register_buffer("bias", None)
 
-    def forward(self, x, return_attention=False):
+    def forward(self, x, mask=None, return_attention=False):
         B, T, C = x.size()
 
         # -------- Q --------
@@ -577,19 +578,9 @@ def test_sliding_window():
     mla_config = MLASlidingConfig()
     mla_sliding = MLA(mla_config)
     y_mla, att_mla = mla_sliding(x, return_attention=True)
-    print(f"✓ MLA with window_size={mla_config.window_size}, sink_size={mla_config.sink_size}")
-    print(f"✓ Latent dim: {mla_config.latent_dim}")
-    print(f"✓ Output: {y_mla.shape}")
-
-    print("\n" + "=" * 70)
-    print("ALL TESTS PASSED!")
-    print("=" * 70)
-    print("\nUsage in your model:")
-    print("  1. Add 'window_size' and 'sink_size' to your config")
-    print("  2. window_size=None or omit it for standard causal attention")
-    print("  3. window_size=512, sink_size=4 for sliding window with sinks")
-    print("=" * 70)
-
+    print(f" MLA with window_size={mla_config.window_size}, sink_size={mla_config.sink_size}")
+    print(f" Latent dim: {mla_config.latent_dim}")
+    print(f" Output: {y_mla.shape}")
 
 if __name__ == "__main__":
     test_sliding_window()

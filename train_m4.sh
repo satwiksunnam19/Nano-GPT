@@ -13,7 +13,8 @@ echo ""
 echo "M4 is ~1.5-2x faster than M1! 🔥"
 echo ""
 
-# M4-optimized settings: Can handle larger models!
+# M4-optimized settings: Can handle larger models!  
+
 python train.py \
     --device=mps \
     --compile=False \
@@ -33,8 +34,10 @@ python train.py \
     --warmup_iters=200 \
     --lr_decay_iters=8000 \
     --out_dir=out-shakespeare-m4\
-    --attention_type=gqa\ 
-    --n_kv_heads=4\
+    --attention_type=gqa\
+    --n_kv_heads=2\
+    --window_size=256\
+    --sink_size=4\
 
 echo ""
 echo "✅ Training complete! Model saved in: out-shakespeare-m4/"

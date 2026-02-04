@@ -51,12 +51,18 @@ gradient_acculation_steps=5*8 # used for simulating largeer batch sizes
 batch_size=12 
 block_size= 1024 
 
-# model 
-n_layer=12 
-n_head=12 
-n_embd=768 
-dropout=0.0  # for pre-training 0 is good, for finetuning try 0.1+ 
-bias=False  # we don't use bias inside LN and LL 
+# model
+n_layer=12
+n_head=12
+n_embd=768
+dropout=0.0  # for pre-training 0 is good, for finetuning try 0.1+
+bias=False  # we don't use bias inside LN and LL
+# attention config
+attention_type='standard'  # 'standard', 'gqa', 'mla'
+n_kv_heads=4  # for GQA
+latent_dim=128  # for MLA
+window_size=None  # sliding window size (None = full causal)
+sink_size=0  # attention sink size 
 
 # adam optimizer 
 learning_rate=6e-4 
@@ -153,9 +159,11 @@ if os.path.exists(meta_path):
     meta_vocab_size=meta['vocab_size'] 
     print(f"found vcab size = {meta_vocab_size} (inside {meta_path})")
 
-# model init 
+# model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line 
+                  bias=bias, vocab_size=None, dropout=dropout,
+                  attention_type=attention_type, n_kv_heads=n_kv_heads, latent_dim=latent_dim,
+                  window_size=window_size, sink_size=sink_size) # start with model_args from command line 
 
 if init_from == "scratch": 
     # init a new model from scratch 
