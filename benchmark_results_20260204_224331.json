@@ -1,0 +1,130 @@
+{
+  "timestamp": "20260204_224331",
+  "device": "mps",
+  "config": {
+    "n_layer": 4,
+    "n_head": 6,
+    "n_embd": 384,
+    "dropout": 0.0,
+    "bias": false,
+    "vocab_size": 50304,
+    "block_size": 256
+  },
+  "results": [
+    {
+      "name": "Standard MHA",
+      "description": "Baseline - standard multi-head attention",
+      "parameters": 26496384,
+      "avg_iter_time_ms": 46.34857749938965,
+      "final_train_loss": 5.037350177764893,
+      "final_val_loss": 5.183493137359619,
+      "memory_mb": 560.332763671875,
+      "total_iters": 1000,
+      "config": {
+        "attention_type": "standard"
+      }
+    },
+    {
+      "name": "GQA (n_kv=2)",
+      "description": "Grouped Query Attention with 2 KV heads (3x reduction)",
+      "parameters": 25709952,
+      "avg_iter_time_ms": 106.86021161079407,
+      "final_train_loss": 4.662735462188721,
+      "final_val_loss": 5.313149929046631,
+      "memory_mb": 523.471435546875,
+      "total_iters": 1000,
+      "config": {
+        "attention_type": "gqa",
+        "n_kv_heads": 2
+      }
+    },
+    {
+      "name": "GQA (n_kv=3)",
+      "description": "Grouped Query Attention with 3 KV heads (2x reduction)",
+      "parameters": 25906560,
+      "avg_iter_time_ms": 110.17554664611816,
+      "final_train_loss": 4.850636959075928,
+      "final_val_loss": 5.3962273597717285,
+      "memory_mb": 528.908935546875,
+      "total_iters": 1000,
+      "config": {
+        "attention_type": "gqa",
+        "n_kv_heads": 3
+      }
+    },
+    {
+      "name": "MLA (latent=128)",
+      "description": "Multi-head Latent Attention with latent_dim=128",
+      "parameters": 25906560,
+      "avg_iter_time_ms": 114.07318162918091,
+      "final_train_loss": 4.300442695617676,
+      "final_val_loss": 5.142367362976074,
+      "memory_mb": 532.221435546875,
+      "total_iters": 1000,
+      "config": {
+        "attention_type": "mla",
+        "latent_dim": 128
+      }
+    },
+    {
+      "name": "MLA (latent=64)",
+      "description": "Multi-head Latent Attention with latent_dim=64 (higher compression)",
+      "parameters": 25611648,
+      "avg_iter_time_ms": 110.84887218475342,
+      "final_train_loss": 3.8295769691467285,
+      "final_val_loss": 4.9964094161987305,
+      "memory_mb": 532.502685546875,
+      "total_iters": 1000,
+      "config": {
+        "attention_type": "mla",
+        "latent_dim": 64
+      }
+    },
+    {
+      "name": "Sliding Window (256)",
+      "description": "Sliding window attention, window=256, sink=4",
+      "parameters": 26496384,
+      "avg_iter_time_ms": 74.66106843948364,
+      "final_train_loss": 4.524611473083496,
+      "final_val_loss": 5.262056827545166,
+      "memory_mb": 560.096435546875,
+      "total_iters": 1000,
+      "config": {
+        "attention_type": "standard",
+        "window_size": 256,
+        "sink_size": 4
+      }
+    },
+    {
+      "name": "Sliding Window (128)",
+      "description": "Sliding window attention, window=128, sink=4",
+      "parameters": 26496384,
+      "avg_iter_time_ms": 69.53249454498291,
+      "final_train_loss": 4.781156539916992,
+      "final_val_loss": 5.221859931945801,
+      "memory_mb": 560.096435546875,
+      "total_iters": 1000,
+      "config": {
+        "attention_type": "standard",
+        "window_size": 128,
+        "sink_size": 4
+      }
+    },
+    {
+      "name": "GQA+SW (n_kv=2, w=128)",
+      "description": "GQA with 2 KV heads + sliding window (128, 4)",
+      "parameters": 25709952,
+      "avg_iter_time_ms": 108.54514861106873,
+      "final_train_loss": 4.62067174911499,
+      "final_val_loss": 5.1729888916015625,
+      "memory_mb": 523.033935546875,
+      "total_iters": 1000,
+      "config": {
+        "attention_type": "gqa",
+        "n_kv_heads": 2,
+        "window_size": 128,
+        "sink_size": 4
+      }
+    }
+  ]
+}
