@@ -18,7 +18,7 @@ max_new_tokens = 500 # no of tokens generated in each sample
 temperature = 0.8 
 top_k= 200 
 seed= 1337 
-device= "cuda" 
+device= "mps" 
 dtype='bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
 compile= False 
 exec(open('configurator.py').read()) # ovverides from command line or config file 

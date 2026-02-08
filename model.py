@@ -403,7 +403,7 @@ class GPT(nn.Module):
         return optimizer
 
     def estimate_mfu(self,fwdbwd_per_iter,dt):
-        """ estimate model flops utilization (MFUs) in units of A100 bfloat16 peak FLOPS"""
+        """ estimate model flops utilization (MFU) as percentage of device peak FLOPS"""
         # first estimate the no of flops we do per iteration
         N= self.get_num_params()
         cfg= self.config
@@ -411,9 +411,24 @@ class GPT(nn.Module):
         flops_per_token = 6*N + 12*L*H*Q*T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-        # express our flops throughput as ratio of A100 bfloat16 peak flops
+        # express our flops throughput as ratio of device peak flops
         flops_achieved = flops_per_iter * (1.0/dt) # per second
-        flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
+
+        # Determine device-specific peak FLOPS
+        # Get first parameter's device to detect what we're running on
+        device = next(self.parameters()).device
+        if device.type == 'cuda':
+            # A100 GPU bfloat16 peak flops is 312 TFLOPS
+            flops_promised = 312e12
+        elif device.type == 'mps':
+            # Apple Silicon M4 (base) FP32 peak ~2 TFLOPS
+            # M4 Pro ~3.5 TFLOPS, M4 Max ~5.5 TFLOPS
+            # Using conservative 2 TFLOPS estimate for base M4
+            flops_promised = 2e12
+        else:
+            # CPU or other device - use A100 as reference for comparison
+            flops_promised = 312e12
+
         mfu = flops_achieved / flops_promised
         return mfu
 
@@ -444,4 +459,4 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
-
+    

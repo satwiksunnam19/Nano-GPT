@@ -1,0 +1,113 @@
+{
+  "timestamp": "20260207_165336",
+  "device": "mps",
+  "validation_type": "early_signal_full_scale",
+  "target_params": 123901440,
+  "base_model_config": {
+    "n_head": 12,
+    "n_embd": 768,
+    "dropout": 0.2,
+    "bias": false,
+    "vocab_size": 50304,
+    "block_size": 384
+  },
+  "attention_configs": [
+    {
+      "name": "MHA",
+      "n_layer": 12,
+      "attention_type": "standard",
+      "description": "Multi-Head Attention (12 KV heads, 12 layers)"
+    },
+    {
+      "name": "GQA (ratio 2)",
+      "n_layer": 13,
+      "attention_type": "gqa",
+      "n_kv_heads": 6,
+      "description": "GQA with 6 KV heads (ratio 2, 13 layers)"
+    },
+    {
+      "name": "GQA (ratio 4)",
+      "n_layer": 14,
+      "attention_type": "gqa",
+      "n_kv_heads": 3,
+      "description": "GQA with 3 KV heads (ratio 4, 14 layers)"
+    },
+    {
+      "name": "MQA",
+      "n_layer": 14,
+      "attention_type": "gqa",
+      "n_kv_heads": 1,
+      "description": "Multi-Query Attention (1 KV head, 14 layers)"
+    }
+  ],
+  "results": [
+    {
+      "name": "MHA",
+      "description": "Multi-Head Attention (12 KV heads, 12 layers)",
+      "parameters": 123882240,
+      "avg_iter_time_ms": 680.1263055801392,
+      "final_train_loss": 4.891088008880615,
+      "final_val_loss": 5.385656833648682,
+      "generalization_gap": 0.4945688247680664,
+      "memory_mb": 3314.051025390625,
+      "total_iters": 500,
+      "tokens_consumed": 768000,
+      "config": {
+        "n_layer": 12,
+        "attention_type": "standard"
+      }
+    },
+    {
+      "name": "GQA (ratio 2)",
+      "description": "GQA with 6 KV heads (ratio 2, 13 layers)",
+      "parameters": 123293952,
+      "avg_iter_time_ms": 742.3629431724548,
+      "final_train_loss": 5.189691543579102,
+      "final_val_loss": 5.508730888366699,
+      "generalization_gap": 0.31903934478759766,
+      "memory_mb": 2937.841064453125,
+      "total_iters": 500,
+      "tokens_consumed": 768000,
+      "config": {
+        "n_layer": 13,
+        "attention_type": "gqa",
+        "n_kv_heads": 6
+      }
+    },
+    {
+      "name": "GQA (ratio 4)",
+      "description": "GQA with 3 KV heads (ratio 4, 14 layers)",
+      "parameters": 125654784,
+      "avg_iter_time_ms": 766.2992129325867,
+      "final_train_loss": 5.131515979766846,
+      "final_val_loss": 5.428039073944092,
+      "generalization_gap": 0.2965230941772461,
+      "memory_mb": 2410.257080078125,
+      "total_iters": 500,
+      "tokens_consumed": 768000,
+      "config": {
+        "n_layer": 14,
+        "attention_type": "gqa",
+        "n_kv_heads": 3
+      }
+    },
+    {
+      "name": "MQA",
+      "description": "Multi-Query Attention (1 KV head, 14 layers)",
+      "parameters": 122902272,
+      "avg_iter_time_ms": 715.2010631561279,
+      "final_train_loss": 5.015993595123291,
+      "final_val_loss": 5.427367687225342,
+      "generalization_gap": 0.4113740921020508,
+      "memory_mb": 2410.257080078125,
+      "total_iters": 500,
+      "tokens_consumed": 768000,
+      "config": {
+        "n_layer": 14,
+        "attention_type": "gqa",
+        "n_kv_heads": 1
+      }
+    }
+  ],
+  "expected_ranking": "MQA > GQA (ratio 4) > GQA (ratio 2) > MHA"
+}

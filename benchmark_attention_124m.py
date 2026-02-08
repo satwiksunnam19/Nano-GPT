@@ -1,19 +1,16 @@
 """
-Benchmark different attention mechanisms on NanoGPT with W&B tracking
+Option C: Early Signal at Full Scale Validation
+Run all 4 attention mechanisms at 124M params for 500 iterations
+Check if validation loss ranking holds from small-scale ablation
 
-Compares:
-- Standard MHA (baseline)
-- GQA with different n_kv_heads
-- MLA with different latent_dim
-- Sliding Window with different window_size
-- Combinations (GQA + Sliding Window)
+Expected ranking from 17M ablation:
+1. MQA (best val loss)
+2. GQA ratio 4
+3. GQA ratio 2
+4. MHA (worst val loss)
 
-Metrics tracked on W&B:
-- Training/validation loss over tokens consumed
-- Training speed (ms/iter)
-- Memory usage (MB)
-- Model parameters
-- Real-time learning curves
+If ranking holds → confidence in small-scale results
+If ranking flips → need deeper investigation
 """
 
 import torch
@@ -28,24 +25,7 @@ import wandb
 
 
 def calculate_gpt_params(n_layer, n_embd, n_head, n_kv_heads, vocab_size, block_size, attention_type='standard'):
-    """
-    Calculate approximate GPT parameter count.
-
-    Formula breakdown:
-    - Token embeddings: vocab_size * n_embd
-    - Position embeddings: block_size * n_embd
-    - Per layer:
-      - LayerNorm1: 2 * n_embd (weight + bias)
-      - Attention QKV: depends on attention type
-        - MHA: 3 * n_embd * n_embd (Q, K, V all full size)
-        - GQA: n_embd * n_embd (Q) + 2 * (n_kv_heads/n_head) * n_embd * n_embd (K, V)
-        - MQA: n_embd * n_embd (Q) + 2 * (1/n_head) * n_embd * n_embd (K, V with 1 head)
-      - Attention out projection: n_embd * n_embd
-      - LayerNorm2: 2 * n_embd
-      - MLP: 2 * (4 * n_embd * n_embd) = 8 * n_embd^2 (up + down projection)
-    - Final LayerNorm: 2 * n_embd
-    - Output head (tied with embeddings): 0 (weight tying)
-    """
+    """Calculate approximate GPT parameter count."""
     # Embeddings (shared)
     params = vocab_size * n_embd  # token embeddings
     params += block_size * n_embd  # position embeddings
@@ -65,9 +45,6 @@ def calculate_gpt_params(n_layer, n_embd, n_head, n_kv_heads, vocab_size, block_
             params += n_embd * n_embd  # Q projection
             params += n_kv_heads * head_dim * n_embd  # K projection
             params += n_kv_heads * head_dim * n_embd  # V projection
-        elif attention_type == 'mla':
-            # MLA has different structure - approximation
-            params += 3 * n_embd * n_embd
 
         # Attention output projection
         params += n_embd * n_embd
@@ -82,23 +59,12 @@ def calculate_gpt_params(n_layer, n_embd, n_head, n_kv_heads, vocab_size, block_
     # Final LayerNorm
     params += 2 * n_embd
 
-    # Output head is tied with token embeddings (no extra params)
-
     return params
 
 
 def find_optimal_layers(target_params, n_embd, n_head, n_kv_heads, vocab_size, block_size,
                        attention_type='standard', tolerance=0.02):
-    """
-    Find the optimal number of layers to match target parameter count.
-
-    Args:
-        target_params: Target parameter count to match
-        tolerance: Acceptable deviation (2% = 0.02)
-
-    Returns:
-        n_layer: Optimal number of layers
-    """
+    """Find optimal number of layers to match target parameter count."""
     # Binary search for optimal layers
     low, high = 1, 50
     best_n_layer = low
@@ -128,33 +94,32 @@ def find_optimal_layers(target_params, n_embd, n_head, n_kv_heads, vocab_size, b
 
     return best_n_layer
 
-# Hyperparameters (small model for fast benchmarking)
-batch_size = 6
-block_size = 384
-max_iters = 5000  # More iterations to see learning curves
-eval_interval = 100  # Evaluate more frequently for smooth curves
+# Hyperparameters for 124M scale
+batch_size = 4  # Reduced for MPS memory safety at 124M scale
+block_size = 384  # Keep smaller for MPS (original 1024 may OOM)
+max_iters = 500  # EARLY SIGNAL: just 500 iterations (~10% of full run)
+eval_interval = 50  # Evaluate frequently to catch early trends
 eval_iters = 50
-log_interval = 50  # Log to W&B frequently
+log_interval = 25
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
-learning_rate = 3e-4  # Stable learning rate
+learning_rate = 3e-4
 
-# Base model configuration (shared across all variants)
-# Following GQA paper methodology: parameter-constant ablation
+# 124M scale configuration (based on GPT-2 124M)
 base_model_config = {
-    'n_head': 8,  # Using 8 heads to allow multiple GQA ratios
-    'n_embd': 256,
+    'n_head': 12,  # GPT-2 124M standard (allows ratios: 1, 2, 3, 4, 6, 12)
+    'n_embd': 768,  # GPT-2 124M standard
     'dropout': 0.2,
     'bias': False,
     'vocab_size': 50304,
     'block_size': block_size,
 }
 
-# Define baseline: GQA with ratio 4 (2 KV heads) - this will be our param count target
-BASELINE_N_LAYER = 6
-BASELINE_ATTENTION = 'gqa'
-BASELINE_N_KV_HEADS = 2
+# Define baseline: Standard MHA with 12 layers (GPT-2 124M architecture)
+BASELINE_N_LAYER = 12
+BASELINE_ATTENTION = 'standard'
+BASELINE_N_KV_HEADS = 12
 
-# Calculate target parameter count from baseline
+# Calculate target parameter count from baseline (should be ~124M)
 target_params = calculate_gpt_params(
     BASELINE_N_LAYER,
     base_model_config['n_embd'],
@@ -165,21 +130,72 @@ target_params = calculate_gpt_params(
     BASELINE_ATTENTION
 )
 
-print(f"\n{'='*70}")
-print(f"TARGET PARAMETER COUNT: {target_params:,} ({target_params/1e6:.2f}M)")
-print(f"Baseline: GQA ratio 4 (8 Q heads, 2 KV heads, {BASELINE_N_LAYER} layers)")
-print(f"{'='*70}\n")
+print(f"\n{'='*80}")
+print(f"OPTION C: EARLY SIGNAL AT FULL SCALE (124M params)")
+print(f"{'='*80}")
+print(f"Target Parameter Count: {target_params:,} ({target_params/1e6:.1f}M)")
+print(f"Baseline: MHA with 12 heads, 12 layers (GPT-2 124M architecture)")
+print(f"Iterations: {max_iters} (early signal validation)")
+print(f"Expected Ranking from 17M ablation: MQA > GQA ratio 4 > GQA ratio 2 > MHA")
+print(f"{'='*80}\n")
 
-# Calculate optimal layers for each attention variant to match target params
-print("Calculating optimal layer counts for parameter-constant ablation...")
+# Calculate optimal layers for each attention variant to match ~124M params
+print("Calculating parameter-constant configurations for 124M scale...")
 print(f"{'Attention Type':<25} | {'Q Heads':<8} | {'KV Heads':<9} | {'Ratio':<8} | {'Layers':<8} | {'Params':<12}")
 print("-" * 90)
 
-# Attention variants to benchmark (parameter-constant ablation)
-# Following GQA paper: MQA, GQA (multiple ratios), MHA
 attention_configs = []
 
-# 1. MQA (Multi-Query Attention): 1 KV head (ratio 8)
+# 1. MHA (baseline - 12 layers)
+params_mha = calculate_gpt_params(
+    BASELINE_N_LAYER, base_model_config['n_embd'], base_model_config['n_head'],
+    BASELINE_N_KV_HEADS, base_model_config['vocab_size'], base_model_config['block_size'], 'standard'
+)
+print(f"{'MHA':<25} | {base_model_config['n_head']:<8} | {base_model_config['n_head']:<9} | {1:<8} | {BASELINE_N_LAYER:<8} | {params_mha:>10,}  ← BASELINE")
+attention_configs.append({
+    'name': 'MHA',
+    'n_layer': BASELINE_N_LAYER,
+    'attention_type': 'standard',
+    'description': f'Multi-Head Attention (12 KV heads, {BASELINE_N_LAYER} layers)'
+})
+
+# 2. GQA ratio 2: 6 KV heads
+n_layer_gqa2 = find_optimal_layers(
+    target_params, base_model_config['n_embd'], base_model_config['n_head'],
+    6, base_model_config['vocab_size'], base_model_config['block_size'], 'gqa'
+)
+params_gqa2 = calculate_gpt_params(
+    n_layer_gqa2, base_model_config['n_embd'], base_model_config['n_head'],
+    6, base_model_config['vocab_size'], base_model_config['block_size'], 'gqa'
+)
+print(f"{'GQA (ratio 2)':<25} | {base_model_config['n_head']:<8} | {6:<9} | {base_model_config['n_head']//6:<8} | {n_layer_gqa2:<8} | {params_gqa2:>10,}")
+attention_configs.append({
+    'name': 'GQA (ratio 2)',
+    'n_layer': n_layer_gqa2,
+    'attention_type': 'gqa',
+    'n_kv_heads': 6,
+    'description': f'GQA with 6 KV heads (ratio 2, {n_layer_gqa2} layers)'
+})
+
+# 3. GQA ratio 4: 3 KV heads
+n_layer_gqa4 = find_optimal_layers(
+    target_params, base_model_config['n_embd'], base_model_config['n_head'],
+    3, base_model_config['vocab_size'], base_model_config['block_size'], 'gqa'
+)
+params_gqa4 = calculate_gpt_params(
+    n_layer_gqa4, base_model_config['n_embd'], base_model_config['n_head'],
+    3, base_model_config['vocab_size'], base_model_config['block_size'], 'gqa'
+)
+print(f"{'GQA (ratio 4)':<25} | {base_model_config['n_head']:<8} | {3:<9} | {base_model_config['n_head']//3:<8} | {n_layer_gqa4:<8} | {params_gqa4:>10,}")
+attention_configs.append({
+    'name': 'GQA (ratio 4)',
+    'n_layer': n_layer_gqa4,
+    'attention_type': 'gqa',
+    'n_kv_heads': 3,
+    'description': f'GQA with 3 KV heads (ratio 4, {n_layer_gqa4} layers)'
+})
+
+# 4. MQA: 1 KV head
 n_layer_mqa = find_optimal_layers(
     target_params, base_model_config['n_embd'], base_model_config['n_head'],
     1, base_model_config['vocab_size'], base_model_config['block_size'], 'gqa'
@@ -197,63 +213,12 @@ attention_configs.append({
     'description': f'Multi-Query Attention (1 KV head, {n_layer_mqa} layers)'
 })
 
-# 2. GQA ratio 4: 2 KV heads (BASELINE)
-params_gqa4 = calculate_gpt_params(
-    BASELINE_N_LAYER, base_model_config['n_embd'], base_model_config['n_head'],
-    2, base_model_config['vocab_size'], base_model_config['block_size'], 'gqa'
-)
-print(f"{'GQA (ratio 4)':<25} | {base_model_config['n_head']:<8} | {2:<9} | {base_model_config['n_head']//2:<8} | {BASELINE_N_LAYER:<8} | {params_gqa4:>10,}  ← BASELINE")
-attention_configs.append({
-    'name': 'GQA (ratio 4)',
-    'n_layer': BASELINE_N_LAYER,
-    'attention_type': 'gqa',
-    'n_kv_heads': 2,
-    'description': f'GQA with 2 KV heads (ratio 4, {BASELINE_N_LAYER} layers) - BASELINE'
-})
-
-# 3. GQA ratio 2: 4 KV heads
-n_layer_gqa2 = find_optimal_layers(
-    target_params, base_model_config['n_embd'], base_model_config['n_head'],
-    4, base_model_config['vocab_size'], base_model_config['block_size'], 'gqa'
-)
-params_gqa2 = calculate_gpt_params(
-    n_layer_gqa2, base_model_config['n_embd'], base_model_config['n_head'],
-    4, base_model_config['vocab_size'], base_model_config['block_size'], 'gqa'
-)
-print(f"{'GQA (ratio 2)':<25} | {base_model_config['n_head']:<8} | {4:<9} | {base_model_config['n_head']//4:<8} | {n_layer_gqa2:<8} | {params_gqa2:>10,}")
-attention_configs.append({
-    'name': 'GQA (ratio 2)',
-    'n_layer': n_layer_gqa2,
-    'attention_type': 'gqa',
-    'n_kv_heads': 4,
-    'description': f'GQA with 4 KV heads (ratio 2, {n_layer_gqa2} layers)'
-})
-
-# 4. MHA (Multi-Head Attention): 8 KV heads (ratio 1)
-n_layer_mha = find_optimal_layers(
-    target_params, base_model_config['n_embd'], base_model_config['n_head'],
-    base_model_config['n_head'], base_model_config['vocab_size'], base_model_config['block_size'], 'standard'
-)
-params_mha = calculate_gpt_params(
-    n_layer_mha, base_model_config['n_embd'], base_model_config['n_head'],
-    base_model_config['n_head'], base_model_config['vocab_size'], base_model_config['block_size'], 'standard'
-)
-print(f"{'MHA':<25} | {base_model_config['n_head']:<8} | {base_model_config['n_head']:<9} | {1:<8} | {n_layer_mha:<8} | {params_mha:>10,}")
-attention_configs.append({
-    'name': 'MHA',
-    'n_layer': n_layer_mha,
-    'attention_type': 'standard',
-    'description': f'Multi-Head Attention ({base_model_config["n_head"]} KV heads, {n_layer_mha} layers)'
-})
-
 print("-" * 90)
 print()
 
 
 def get_batch(split, data_dir='data/shakesphere'):
     """Load a batch of data"""
-    import numpy as np
-
     if split == 'train':
         data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     else:
@@ -297,17 +262,17 @@ def get_memory_usage():
 
 def benchmark_config(config_dict, config_name, base_config):
     """Benchmark a single attention configuration with W&B tracking"""
-    n_layer = config_dict.get('n_layer', 4)
+    n_layer = config_dict.get('n_layer', 12)
     n_kv_heads = config_dict.get('n_kv_heads', base_config['n_head'])
     ratio = base_config['n_head'] // n_kv_heads if n_kv_heads > 0 else 1
 
-    print(f"\n{'='*70}")
+    print(f"\n{'='*80}")
     print(f"Benchmarking: {config_name}")
     print(f"Description: {config_dict['description']}")
     print(f"Layers: {n_layer}, KV Heads: {n_kv_heads}, Ratio: {ratio}")
-    print(f"{'='*70}")
+    print(f"{'='*80}")
 
-    # Create model config (merge base config with attention-specific config)
+    # Create model config
     full_config = {**base_config, **{k: v for k, v in config_dict.items() if k not in ['name', 'description']}}
     config = GPTConfig(**full_config)
 
@@ -317,12 +282,12 @@ def benchmark_config(config_dict, config_name, base_config):
 
     # Count parameters
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Parameters: {n_params:,} ({n_params/1e6:.2f}M)")
+    print(f"Parameters: {n_params:,} ({n_params/1e6:.1f}M)")
 
     # Initialize W&B run
     run = wandb.init(
-        project="nanogpt-attention-ablation",
-        name=config_name,
+        project="nanogpt-124m-early-signal",
+        name=f"{config_name} (124M, 500 iters)",
         config={
             "attention_type": config_dict.get('attention_type', 'standard'),
             "n_params": n_params,
@@ -333,6 +298,7 @@ def benchmark_config(config_dict, config_name, base_config):
             "block_size": block_size,
             "learning_rate": learning_rate,
             "max_iters": max_iters,
+            "validation_type": "early_signal_full_scale",
             **{k: v for k, v in config_dict.items() if k not in ['name', 'description']}
         },
         reinit=True
@@ -350,13 +316,13 @@ def benchmark_config(config_dict, config_name, base_config):
     losses = []
     tokens_consumed = 0
 
-    print(f"\nTraining for {max_iters} iterations...")
+    print(f"\nTraining for {max_iters} iterations (early signal validation)...")
 
     for iter_num in range(max_iters):
         # Get batch
         X, Y = get_batch('train')
 
-        # Forward pass (time this)
+        # Forward pass
         t0 = time.time()
         logits, loss = model(X, Y)
 
@@ -386,12 +352,13 @@ def benchmark_config(config_dict, config_name, base_config):
                 'tokens_millions': tokens_consumed / 1e6,
                 'train_loss': train_loss,
                 'val_loss': val_loss,
+                'generalization_gap': val_loss - train_loss,
                 'iter_time_ms': iter_time,
                 'memory_mb': get_memory_usage() - mem_before
             })
 
             print(f"iter {iter_num:4d}: train loss {train_loss:.4f}, "
-                  f"val loss {val_loss:.4f}, tokens {tokens_consumed/1e6:.2f}M")
+                  f"val loss {val_loss:.4f}, gap {val_loss - train_loss:.4f}, tokens {tokens_consumed/1e6:.2f}M")
 
         # Log training loss more frequently
         elif iter_num % log_interval == 0:
@@ -418,8 +385,9 @@ def benchmark_config(config_dict, config_name, base_config):
         'description': config_dict['description'],
         'parameters': n_params,
         'avg_iter_time_ms': float(avg_time),
-        'final_train_loss': float(final_train_loss),
+        'final_train_loss': float(final_eval['train'].item()) if torch.is_tensor(final_eval['train']) else float(final_eval['train']),
         'final_val_loss': float(final_eval['val'].item()) if torch.is_tensor(final_eval['val']) else float(final_eval['val']),
+        'generalization_gap': float(final_eval['val'].item() - final_eval['train'].item()),
         'memory_mb': float(mem_used),
         'total_iters': max_iters,
         'tokens_consumed': tokens_consumed,
@@ -429,6 +397,7 @@ def benchmark_config(config_dict, config_name, base_config):
     # Log final summary
     wandb.summary['final_train_loss'] = results['final_train_loss']
     wandb.summary['final_val_loss'] = results['final_val_loss']
+    wandb.summary['generalization_gap'] = results['generalization_gap']
     wandb.summary['avg_iter_time_ms'] = results['avg_iter_time_ms']
     wandb.summary['total_tokens_millions'] = tokens_consumed / 1e6
 
@@ -439,70 +408,56 @@ def benchmark_config(config_dict, config_name, base_config):
 
 
 def print_comparison_table(all_results):
-    """Print a comparison table for attention ablation study"""
+    """Print comparison table for early signal validation"""
     print("\n" + "="*130)
-    print("ABLATION STUDY RESULTS - ATTENTION MECHANISMS (PARAMETER-CONSTANT)")
-    print("Following GQA Paper Methodology: MQA, GQA (multiple ratios), MHA")
+    print("OPTION C: EARLY SIGNAL AT FULL SCALE (124M params, 500 iterations)")
+    print("Validation of 17M ablation results at full scale")
     print("="*130)
 
-    # Print header
-    print(f"\n{'Attention Type':<20} | {'Layers':<7} | {'KV Heads':<9} | {'Ratio':<6} | {'Params':<11} | {'Time/iter':<11} | {'Val Loss':<10} | {'Tokens (M)':<11}")
+    print(f"\n{'Attention Type':<20} | {'Layers':<7} | {'KV Heads':<9} | {'Params':<11} | {'Val Loss':<10} | {'Gen Gap':<10} | {'Time/iter':<11}")
     print("-" * 130)
 
     # Sort by validation loss (best to worst)
     for result in sorted(all_results, key=lambda x: x['final_val_loss']):
         n_layer = result['config'].get('n_layer', 'N/A')
-        n_kv_heads = result['config'].get('n_kv_heads', 8)  # MHA default
-        n_head = 8
-        ratio = n_head // n_kv_heads if n_kv_heads > 0 else 1
+        n_kv_heads = result['config'].get('n_kv_heads', 12)
 
-        print(f"{result['name']:<20} | {n_layer:>6} | {n_kv_heads:>8} | {ratio:>5} | {result['parameters']/1e6:>9.2f}M | "
-              f"{result['avg_iter_time_ms']:>9.2f}ms | {result['final_val_loss']:>10.4f} | "
-              f"{result['tokens_consumed']/1e6:>9.2f}")
+        print(f"{result['name']:<20} | {n_layer:>6} | {n_kv_heads:>8} | {result['parameters']/1e6:>9.1f}M | "
+              f"{result['final_val_loss']:>10.4f} | {result['generalization_gap']:>10.4f} | "
+              f"{result['avg_iter_time_ms']:>9.2f}ms")
 
     print("\n" + "="*130)
-    print("\nKey Findings:")
+    print("\n🔍 Ranking Analysis:")
 
-    # Find best in each category
-    fastest = min(all_results, key=lambda x: x['avg_iter_time_ms'])
-    best_loss = min(all_results, key=lambda x: x['final_val_loss'])
-    smallest = min(all_results, key=lambda x: x['parameters'])
+    # Check if ranking matches 17M ablation
+    sorted_by_val = sorted(all_results, key=lambda x: x['final_val_loss'])
+    ranking = [r['name'] for r in sorted_by_val]
 
-    print(f"1. Fastest: {fastest['name']} - {fastest['avg_iter_time_ms']:.2f}ms/iter")
-    print(f"2. Best Loss: {best_loss['name']} - val loss {best_loss['final_val_loss']:.4f}")
-    print(f"3. Most Efficient (params): {smallest['name']} - {smallest['parameters']/1e6:.2f}M params")
+    print(f"\nActual ranking at 124M scale: {' > '.join(ranking)}")
+    print(f"Expected from 17M ablation: MQA > GQA (ratio 4) > GQA (ratio 2) > MHA")
 
-    # Memory efficiency
-    if all_results[0]['memory_mb'] > 0:
-        lowest_mem = min(all_results, key=lambda x: x['memory_mb'])
-        print(f"4. Lowest Memory: {lowest_mem['name']} - {lowest_mem['memory_mb']:.1f}MB")
-
-    # Parameter range
-    param_range = max(r['parameters'] for r in all_results) - min(r['parameters'] for r in all_results)
-    avg_params = sum(r['parameters'] for r in all_results) / len(all_results)
-    print(f"\nParameter Count Variance: {param_range/1e6:.2f}M ({param_range/avg_params*100:.1f}% of average)")
-    print(f"Average Params: {avg_params/1e6:.2f}M")
+    # Check if MQA still wins
+    if ranking[0] == 'MQA':
+        print("\n✅ RANKING HOLDS: MQA still achieves best validation loss at 124M scale!")
+        print("   → Small-scale ablation successfully predicts full-scale performance")
+        print("   → Proceed with MQA for production implementation")
+    else:
+        print(f"\n⚠️  RANKING CHANGED: {ranking[0]} wins at 124M scale (not MQA)")
+        print("   → Small-scale results did NOT transfer to full scale")
+        print("   → Need deeper investigation before production decision")
 
 
 def main():
-    print("\n" + "="*70)
-    print("NanoGPT Attention Mechanism Ablation Study")
-    print("Following GQA Paper: MQA, GQA (ratios 2, 4), MHA")
-    print("="*70)
+    print("\n" + "="*80)
+    print("OPTION C: EARLY SIGNAL AT FULL SCALE VALIDATION")
+    print("="*80)
     print(f"Device: {device}")
-    print(f"Batch size: {batch_size}")
+    print(f"Batch size: {batch_size} (reduced for 124M scale)")
     print(f"Block size: {block_size}")
-    print(f"Iterations: {max_iters}")
+    print(f"Iterations: {max_iters} (10% of full run)")
     print(f"Learning rate: {learning_rate}")
-    print(f"\nBase Configuration (shared):")
-    print(f"  {base_model_config['n_head']} Q heads, "
-          f"{base_model_config['n_embd']} embd, "
-          f"dropout {base_model_config['dropout']}")
-    print(f"\nAblation Methodology:")
-    print(f"  - Compare: MQA (1 KV head), GQA (2, 4 KV heads), MHA (8 KV heads)")
-    print(f"  - Adjust n_layer per attention type to maintain constant parameter count")
-    print(f"  - Target: ~{target_params/1e6:.2f}M parameters")
-    print(f"  - Baseline: GQA ratio 4 (2 KV heads, {BASELINE_N_LAYER} layers)")
+    print(f"\n🎯 Goal: Validate if 17M ablation ranking transfers to 124M scale")
+    print(f"Expected: MQA > GQA ratio 4 > GQA ratio 2 > MHA")
     print()
 
     # Run ablation study across all attention mechanisms
@@ -512,9 +467,9 @@ def main():
 
     for config_dict in attention_configs:
         current_run += 1
-        print(f"\n{'='*70}")
+        print(f"\n{'='*80}")
         print(f"Run {current_run}/{total_runs}: {config_dict['name']}")
-        print(f"{'='*70}")
+        print(f"{'='*80}")
 
         try:
             result = benchmark_config(
@@ -535,19 +490,21 @@ def main():
 
         # Save results to JSON
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = f"ablation_results_{timestamp}.json"
+        output_file = f"early_signal_124m_{timestamp}.json"
         with open(output_file, 'w') as f:
             json.dump({
                 'timestamp': timestamp,
                 'device': device,
+                'validation_type': 'early_signal_full_scale',
+                'target_params': target_params,
                 'base_model_config': base_model_config,
                 'attention_configs': attention_configs,
                 'results': all_results,
-                'methodology': 'parameter-constant ablation (adjust n_layer per attention type)'
+                'expected_ranking': 'MQA > GQA (ratio 4) > GQA (ratio 2) > MHA'
             }, f, indent=2)
 
         print(f"\n✅ Results saved to: {output_file}")
-        print(f"📊 View results on W&B: https://wandb.ai")
+        print(f"📊 View results on W&B: https://wandb.ai/[your-username]/nanogpt-124m-early-signal")
     else:
         print("\n❌ No successful benchmarks to compare")
 

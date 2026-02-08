@@ -48,3 +48,10 @@ data/*/val.bin
 
 # Logs
 *.log
+
+# Benchmark results
+benchmark_results_*.json
+ablation_results_*.json
+
+# W&B
+wandb/
